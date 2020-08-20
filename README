@@ -4,7 +4,6 @@ Tested with:
  - numpy
  - pandas
  - netCDF4
- - scikit-learn (0.22.2.post1)
 
 Run the testcase by executing:
 ./validate.py

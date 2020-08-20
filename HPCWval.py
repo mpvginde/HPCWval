@@ -1,8 +1,6 @@
 from netCDF4 import Dataset
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
 from itertools import combinations
 import random
 import pickle
@@ -32,13 +30,15 @@ class Validator:
         with open(filename,'rb') as f:
           pkl = pickle.load(f)
         self.__ignore = pkl[0]
-        self.__sc = pkl[1]
-        self.__pca = pkl[2]
+        self.__Vmu = pkl[1]
+        self.__Vsigma = pkl[2]
+        self.__Vmu2 = pkl[3]
+        self.__P = pkl[4]
+        self.__Ssigma = pkl[5]
         self.nNew=3
         self.nRun=2
         self.nPc=2
         self.__limit = 3.448275
-        self.__n_components = self.__pca.n_components_
         self.__iname = "ocean_omip_medium_OUT__23000201T000000Z.nc"
         self.__oname = "ocean_omip_medium_GLOBALMEANOUT__23000201T000000Z.nc"
       elif testcase == 'large':
@@ -81,16 +81,20 @@ class Validator:
     '''
     ensREF = kwargs.get('ensREF',None)
     if (ensREF is not None):
+      from sklearn.preprocessing import StandardScaler
+      from sklearn.decomposition import PCA
       sc = StandardScaler()
       pca = PCA(n_components = self.__n_components)
       refENS_sc = sc.fit_transform(refENS)
       pca.fit(refENS_sc)
     else:
-      sc = self.__sc
-      pca = self.__pca
-    ensNEW_sc = sc.transform(ensNEW)
-    pcaNEW = pca.transform(ensNEW_sc)
-    x = np.abs(pcaNEW/np.sqrt(pca.explained_variance_)[None,:]) > self.__Msigma
+      Vmu    = self.__Vmu
+      Vsigma = self.__Vsigma
+      Vmu2   = self.__Vmu2
+      P      = self.__P
+      Ssigma = self.__Ssigma
+    pcaNEW = np.dot((((ensNEW-Vmu)/Vsigma).fillna(0.0)-Vmu2),P)
+    x = np.abs(pcaNEW/Ssigma) > self.__Msigma
     fails = [ self.__isFail(x[index,:]) for index in combinations(range(x.shape[0]),self.nNew) ]
     return((np.sum(fails)/len(fails))*100)
 
