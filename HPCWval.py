@@ -163,6 +163,11 @@ class Calibrator:
         Calibrator object.
     '''
     self.ensemble = kwargs.get('ensemble',None)
+    self.ensSize = None
+    self.nNew    = None
+    self.nRun    = None
+    self.nPc     = None
+    self.nComponents = None
 
   def _isFail(self,input,nRun,nPc):
     candidates =  input[np.sum(input,axis=1) >= nPc ,:]
@@ -214,35 +219,57 @@ class Calibrator:
       output.append(np.sum(fails)/len(fails)*100)
     return(output)
 
-  def nComp(self,n_components=None,auto=False):
+  def calibrateComp(self):
     '''Calibrate/Set the number of PC components to use when defining the reference ensemble.
     Args:
-        n_components (optional): this is the number of components used for PCA, when not given, a plot showing the cumulative variance explained by each PC is shown.
+        None
     Returns:
+        Plot of the cumulative explained variance for all principle components
     '''
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    import matplotlib.pyplot as plt
     if self.ensemble is None:
       raise Exception('No ensemble present, load/set an ensemble first.')
-    if n_components is not None:
-      self.__n_components = n_components  
+    sc  = StandardScaler()
+    pca = PCA()
+    ensSC = sc.fit_transform(self.ensemble)
+    pca.fit(ensSC)
+    plt.plot(range(1,pca.n_components_+1),np.cumsum(pca.explained_variance_ratio_))
+    plt.show(block=False)
+
+  def setComp(self,nComponents=None):
+    '''Set the number of PC components to use when defining the reference ensemble.
+    Args:
+        nComponents : this is the number of components used for PCA (default = Number of PCs
+                       needed to explain 90% of the variance.
+    Returns:
+        None
+    '''
+    if nComponents is not None:
+      self.nComponents = nComponents  
     else:
       from sklearn.preprocessing import StandardScaler
       from sklearn.decomposition import PCA
       import matplotlib.pyplot as plt
       sc  = StandardScaler()
-      if auto:
-        pca = PCA(n_components=0.9)
-      else:
-        pca = PCA()
+      pca = PCA(n_components=0.9)
       ensSC = sc.fit_transform(self.ensemble)
       pca.fit(ensSC)
-      if auto:
-        self.__n_components = pca.n_components_
-        print('Number of PC-components to use is set to: ' + str(self.__n_components) + '(explains 90% of the variance)')
-      else:
-        plt.plot(range(1,pca.n_components_+1),np.cumsum(pca.explained_variance_ratio_))
-        plt.show(block=False)
+      self.nComponents = pca.n_components_
+      print('Number of PC-components to use is set to: ' + str(self.nComponents) + ' (explains 90% of the variance)')
 
-  def failParams(self,nCPU=None,nRunMax=5,nPcMax=5):
+  def calibrateFailParams(self,nCPU=None,nRunMax=5,nPcMax=5):
+    ''' Calibrate the nNew, nRun and nPc parameters. 
+    Args:
+        nCPU    : Number of CPUs used for calculations (default = max number of CPUs available)
+        nRunMax : Maximum value of number of new runs (nNEW) to investigate. Caution: becomes 
+                 calculational very heavy for nRunMax > 5 (default = 5)
+        nPcMax  : Maximum value of number of failed PCs to investigate (default = 5)
+    Returns:
+        A list of dataframes, one element for each value going from 2 to nRunMax, every dataframe
+        lists the False positive rate in in function of nNew (rows) and nPc (columns)
+    '''
     import multiprocessing as mp
     import functools
     if nCPU is None:
@@ -254,7 +281,7 @@ class Calibrator:
     else:
       print('using ' + str(nCPU) + ' CPUs')
     params = [ (nNew, nRun, nPC) for nNew in range (2,nRunMax+1) for nRun in range(1,nNew+1) for nPC in range(1,nPcMax+1) ]
-    f_simpleEET = functools.partial(self._simpleEET,ensemble=self.ensemble,n_components=self.__n_components)
+    f_simpleEET = functools.partial(self._simpleEET,ensemble=self.ensemble,n_components=self.nComponents)
     with mp.Pool(nCPU) as pool:
       result = pool.map(f_simpleEET,params)
     hmaps = []
@@ -273,14 +300,32 @@ class Calibrator:
     return(hmaps)
 
   def setFailParams(self,nNew,nRun,nPc):
+    ''' Set the nNew, nRun adn nPc variables
+    Args:
+       nNew
+       nRun
+       nPc
+    Returns:
+       none
+    '''
     self.nNew = nNew
     self.nRun = nRun
     self.nPc  = nPc
 
-  def ensSize(self,ensSizes,nCPU=None):
+  def calibrateEnsSize(self,ensSizes,nCPU=None):
+    ''' Calibrate the ensemble size the ensemble size
+    Args:
+       ensSizes : List of ensemble sizes (e.g. [30, 40, 50])
+       nCPU     : Number of CPUs used for calculations (default = max number of CPUs available) 
+    Returns:
+       Boxplot of the false positive rate for each ensemble size
+       Dataframe containing the 10000 false positive rates for each ensemble size
+    '''
     import multiprocessing as mp
     import functools
     from matplotlib.pyplot import show
+    if self.nNew is None or self.nRun is None or self.nPc is None:
+      raise Exception('Failure parameters nNew, nRun, nPc are not set, calibrate and set them first')
     if nCPU is None:
       nCPU = mp.cpu_count()
       print('using maximum CPUs available: ' +str(nCPU) )
@@ -295,7 +340,7 @@ class Calibrator:
     for ensSize in ensSizes:
       iREFs = [ random.sample(range(self.ensemble.values.shape[0]),ensSize) for _ in range(100) ]
       print('Performing fullEET with ensemble size: ' + str(ensSize))
-      f_fullEET = functools.partial(self._fullEET, ensemble = self.ensemble, n_components = self.__n_components, nNew = self.nNew, nRun = self.nRun, nPc = self.nPc, Msigma = 2)
+      f_fullEET = functools.partial(self._fullEET, ensemble = self.ensemble, n_components = self.nComponents, nNew = self.nNew, nRun = self.nRun, nPc = self.nPc, Msigma = 2)
       print(' - Starting pool..')
       with mp.Pool(nCPU) as pool:
         res = pool.map(f_fullEET, iREFs)
@@ -308,6 +353,16 @@ class Calibrator:
     ax.axhline(0.5)
     show()
     return(result)
+  
+  def setEnsSize(self,ensSize):
+    ''' Set the ensemble size
+     Args:
+         ensSize
+     Returns:
+         none
+    '''
+    self.ensSize = ensSize
+   
 
 def main():
   print('This is the main function')
