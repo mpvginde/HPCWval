@@ -5,6 +5,45 @@ from itertools import combinations
 import random
 import pickle
 
+
+def loadEnsemble(members, dir=None, ignore=[], timestep=-1, saveCDO = False,calcGlobalMean = False, iname = None, oname = None):
+    if calcGlobalMean:
+      try:
+        from cdo import Cdo
+      except:
+        print('Error: cdo module not found!')
+      cdo = Cdo()
+    else:
+      print("Loading global means...")
+    first_member = True
+    result = np.array([])
+    for member in members:
+      ifile = '/'.join(filter(None,(dir,str(member).zfill(3),iname)))
+      ofile = '/'.join(filter(None,(dir,str(member).zfill(3),oname)))
+      if calcGlobalMean:
+        print("calculating values for member: " + str(member).zfill(3) + " ...")
+        if saveCDO:
+          final = cdo.fldmean(input='-vertavg %s'%(ifile), options='-P 16',output=ofile)
+        else: 
+          final = cdo.fldmean(input='-vertavg %s'%(ifile), options='-P 16') 
+        nc_fid = Dataset(final,"r")
+      else:
+        nc_fid = Dataset(ofile,'r')
+      while first_member:
+        if len(ignore) == 0:
+          ignore = [ dim for dim in nc_fid.dimensions ]
+        vrbls = [ var for var in nc_fid.variables if var not in ignore ]
+        first_member = False
+      vals = np.stack([ nc_fid.variables[var][:].flatten() for var in vrbls ],axis=0)
+      result = np.dstack([result,vals]) if result.size else vals
+      nc_fid.close()
+    if timestep < 0:
+      df = pd.DataFrame(np.mean(result,axis=1),index=vrbls).transpose()
+    else:  
+      df = pd.DataFrame(result[:,timestep,:],index=vrbls).transpose()
+    return(df)
+
+
 class Validator:
   def __init__(self,model=None,**kw):
     '''Initalize Validator
@@ -98,48 +137,9 @@ class Validator:
     fails = [ self.__isFail(x[index,:]) for index in combinations(range(x.shape[0]),self.nNew) ]
     return((np.sum(fails)/len(fails))*100)
 
+  def loadEnsemble(self,members,dir=None, timestep=-1, saveCDO = False, calcGlobalMean = False):
+    self.ensNEW = loadEnsemble(members = members, dir = dir, ignore= self.__ignore, timestep=timestep, saveCDO = saveCDO ,calcGlobalMean = calcGlobalMean, iname = self.__iname, oname = self.__oname) 
 
-  def loadEnsemble(self,members, dir=None, timestep=-1, saveCDO = False,calcGlobalMean = False):
-    if calcGlobalMean:
-      try:
-        from cdo import Cdo
-      except:
-        print('Error: cdo module not found!')
-      cdo = Cdo()
-    else:
-      print("Loading global means...")
-    first_member = True
-    result = np.array([])
-    for member in members:
-      ifile = '/'.join(filter(None,(dir,str(member).zfill(3),self.__iname)))
-      ofile = '/'.join(filter(None,(dir,str(member).zfill(3),self.__oname)))
-      if calcGlobalMean:
-        print("calculating values for member: " + str(member).zfill(3) + " ...")
-        if saveCDO:
-          final = cdo.fldmean(input='-vertavg %s'%(ifile), options='-P 16',output=ofile)
-        else: 
-          final = cdo.fldmean(input='-vertavg %s'%(ifile), options='-P 16') 
-        nc_fid = Dataset(final,"r")
-      else:
-        nc_fid = Dataset(ofile,'r')
-      while first_member:
-        if len(self.__ignore) == 0:
-          self.__ignore = [ dim for dim in nc_fid.dimensions ]
-          self.__ignore.append('time_bnds') if 'time_bnds' in nc_fid.variables else self.__ignore 
-          self.__ignore.append('wet_c') if 'wet_c' in nc_fid.variables else self.__ignore
-          dims.append('wet_e') if 'wet_e' in nc_fid.variables else self.__ignore
-        vrbls = [ var for var in nc_fid.variables if var not in self.__ignore ]
-        first_member = False
-      vals = np.stack([ nc_fid.variables[var][:].flatten() for var in vrbls ],axis=0)
-      result = np.dstack([result,vals]) if result.size else vals
-      nc_fid.close()
-    if timestep < 0:
-      df = pd.DataFrame(np.mean(result,axis=1),index=vrbls).transpose()
-    else:  
-      df = pd.DataFrame(result[:,timestep,:],index=vrbls).transpose()
-    self.ensNEW = df
-    return(df)
- 
   def validate(self, *args):
     if args:
       FR = self.__EET(args[0])
@@ -153,7 +153,161 @@ class Validator:
       print(' - FAILURE!')
       print(' -- The new ensemble is not statistically equivalent to the reference ensemble.')
       print(' --- The failure rate should not exceed {0:5.2f}%'.format(self.__limit))
-     
+
+class Calibrator:
+  def __init__(self,**kwargs):
+    '''Initalize Calibrator 
+     Args:
+         ensemble (optional):  the ensemble used for calibrating in pandas.dataframe format [#members, #variables]. 
+     Returns:
+        Calibrator object.
+    '''
+    self.ensemble = kwargs.get('ensemble',None)
+
+  def _isFail(self,input,nRun,nPc):
+    candidates =  input[np.sum(input,axis=1) >= nPc ,:]
+    output = [ np.sum(np.prod(candidates[index,:],axis=0)) >= nPc for index in combinations(range(candidates.shape[0]),nRun) ]
+    return (any(output))
+
+  def _EET(self,ensNEW,transform,nNew,nRun,nPc,Msigma = 2):
+    pcaNEW = np.dot((((ensNEW-transform[0])/transform[1]).fillna(0.0)-transform[2]),transform[3])
+    x = np.abs(pcaNEW/transform[4]) > Msigma
+    fails = [ self._isFail(input =x[index,:],nRun = nRun, nPc = nPc) for index in combinations(range(x.shape[0]),nNew) ]
+    return(np.sum(fails)/len(fails)*100)
+
+  def _simpleEET(self,param,ensemble,n_components,Msigma = 2):
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    print('starting ' + str(param) + '..')
+    nNew, nRun, nPc = param
+    size = int(5 * np.ceil(len(ensemble.columns)*1.5/5))
+    temp = []
+    for _ in range(100):
+      ensREF    = ensemble.sample(size)
+      ensNEW    = ensemble.drop(ensREF.index).sample(30)
+      scaler    = StandardScaler()
+      ensREF_sc = scaler.fit_transform(ensREF)
+      pca       = PCA(n_components = n_components).fit(ensREF_sc)
+      ensNEW_sc = scaler.transform(ensNEW)
+      pcaNEW    = pca.transform(ensNEW_sc)
+      x         = np.abs(pcaNEW/np.sqrt(pca.explained_variance_)[None,:]) > Msigma
+      fails = [ self._isFail(input =x[index,:],nRun = nRun, nPc = nPc) for index in combinations(range(x.shape[0]),nNew) ]
+      temp.append(np.sum(fails)/len(fails)*100)
+    print(str(param) + ' finished')
+    return(np.mean(temp))
+
+  def _fullEET(self,iREF,ensemble, n_components, nNew, nRun, nPc, Msigma = 2):
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    ensREF    = ensemble.values[iREF,:]
+    scaler    = StandardScaler()
+    ensREF_sc = scaler.fit_transform(ensREF)
+    pca       = PCA(n_components = n_components).fit(ensREF_sc)
+    ensREST   = np.delete(arr=ensemble.values, obj=iREF,axis=0)
+    iNEWs     = [ random.sample(range(ensREST.shape[0]),30) for _ in range(100) ]
+    output    = []
+    for iNEW in iNEWs:
+      ensNEW_sc = scaler.transform(ensREST[iNEW,:])
+      pcaNEW    = pca.transform(ensNEW_sc)
+      x         = np.abs(pcaNEW/np.sqrt(pca.explained_variance_)[None,:]) > Msigma
+      fails     = [ self._isFail(input = x[index,:], nRun = nRun, nPc = nPc) for index in combinations(range(x.shape[0]),nNew) ]
+      output.append(np.sum(fails)/len(fails)*100)
+    return(output)
+
+  def nComp(self,n_components=None,auto=False):
+    '''Calibrate/Set the number of PC components to use when defining the reference ensemble.
+    Args:
+        n_components (optional): this is the number of components used for PCA, when not given, a plot showing the cumulative variance explained by each PC is shown.
+    Returns:
+    '''
+    if self.ensemble is None:
+      raise Exception('No ensemble present, load/set an ensemble first.')
+    if n_components is not None:
+      self.__n_components = n_components  
+    else:
+      from sklearn.preprocessing import StandardScaler
+      from sklearn.decomposition import PCA
+      import matplotlib.pyplot as plt
+      sc  = StandardScaler()
+      if auto:
+        pca = PCA(n_components=0.9)
+      else:
+        pca = PCA()
+      ensSC = sc.fit_transform(self.ensemble)
+      pca.fit(ensSC)
+      if auto:
+        self.__n_components = pca.n_components_
+        print('Number of PC-components to use is set to: ' + str(self.__n_components) + '(explains 90% of the variance)')
+      else:
+        plt.plot(range(1,pca.n_components_+1),np.cumsum(pca.explained_variance_ratio_))
+        plt.show(block=False)
+
+  def failParams(self,nCPU=None,nRunMax=5,nPcMax=5):
+    import multiprocessing as mp
+    import functools
+    if nCPU is None:
+      nCPU = mp.cpu_count()
+      print('using maximum CPUs available: ' +str(nCPU) )
+    elif nCPU > mp.cpu_count():
+      nCPU = mp.cpu_count()
+      print('nCPU exceeds maximum avaible number of CPUs, nCPU is set to:' + str(nCPU))
+    else:
+      print('using ' + str(nCPU) + ' CPUs')
+    params = [ (nNew, nRun, nPC) for nNew in range (2,nRunMax+1) for nRun in range(1,nNew+1) for nPC in range(1,nPcMax+1) ]
+    f_simpleEET = functools.partial(self._simpleEET,ensemble=self.ensemble,n_components=self.__n_components)
+    with mp.Pool(nCPU) as pool:
+      result = pool.map(f_simpleEET,params)
+    hmaps = []
+    k = 0
+    for nNew in range(2,nRunMax+1):
+      temp = np.zeros(shape=(nNew,nPcMax))
+      for i,nRun in enumerate(range(1,nNew+1)):
+        for j,nPc in enumerate(range(1,nPcMax+1)):
+          temp[i,j] = result[k]
+          k += 1
+      hmaps.append(pd.DataFrame(temp))
+#      plt.pcolor(df)
+#      plt.yticks(np.arange(0.5, len(df.index), 1), df.index)
+#      plt.xticks(np.arange(0.5, len(df.columns), 1), df.columns)
+#      plt.show()
+    return(hmaps)
+
+  def setFailParams(self,nNew,nRun,nPc):
+    self.nNew = nNew
+    self.nRun = nRun
+    self.nPc  = nPc
+
+  def ensSize(self,ensSizes,nCPU=None):
+    import multiprocessing as mp
+    import functools
+    from matplotlib.pyplot import show
+    if nCPU is None:
+      nCPU = mp.cpu_count()
+      print('using maximum CPUs available: ' +str(nCPU) )
+    elif nCPU > mp.cpu_count():
+      nCPU = mp.cpu_count()
+      print('nCPU exceeds maximum avaible number of CPUs, nCPU is set to:' + str(nCPU))
+    else:
+      print('using ' + str(nCPU) + ' CPUs')
+    if max(ensSizes) > self.ensemble.shape[0]-32:
+      raise Exception('Given the provided ensemble, the maximum ensemble size cannot exceed ' + str(self.ensemble.shape[0]-32))
+    result = []
+    for ensSize in ensSizes:
+      iREFs = [ random.sample(range(self.ensemble.values.shape[0]),ensSize) for _ in range(100) ]
+      print('Performing fullEET with ensemble size: ' + str(ensSize))
+      f_fullEET = functools.partial(self._fullEET, ensemble = self.ensemble, n_components = self.__n_components, nNew = self.nNew, nRun = self.nRun, nPc = self.nPc, Msigma = 2)
+      print(' - Starting pool..')
+      with mp.Pool(nCPU) as pool:
+        res = pool.map(f_fullEET, iREFs)
+      print(' - Pool finished.')
+      flat = [ item for sublist in res for item in sublist ]
+      result.append(flat)
+    result = pd.DataFrame(result).transpose()
+    result.columns = ensSizes
+    ax = result.boxplot(showfliers=False)
+    ax.axhline(0.5)
+    show()
+    return(result)
 
 def main():
   print('This is the main function')
