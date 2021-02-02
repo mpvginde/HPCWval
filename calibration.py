@@ -56,7 +56,7 @@ caliSize = cal.calibrateEnsSize([200,250])
 # Ensemble size is large enough if the shape of the boxplot stabelizes 
 # with a median between 0.5 and 1.5
 # From these FPRs we can set the limit for rejecting new ensembles
-limit = np.percentile(caliSize[200],90)
+limit = np.percentile(caliSize[200],95)
 print("We select ensemble size= 200 and Failure Rate limit " + str(limit) + "%")
 cal.setEnsSize(ensSize=200,limitFR=limit)
 
