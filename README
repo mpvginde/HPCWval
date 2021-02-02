@@ -1,10 +1,18 @@
 Tested with:
  - Python3.6.0
- Required python packages
+ Required python packages for validation
  - numpy
  - pandas
  - netCDF4
-
-Run the testcase by executing:
+ - pickle
+ Required python packages for calibration
+ - numpy 
+ - pandas
+ - netCDF4
+ - pickle
+ - sklearn
+Run the validation testcase by executing:
 ./validate.py
 
+Run the calibration testcase by executing 
+./calibration.py

@@ -1,3 +1,7 @@
+# Written by Michiel Van Ginderachter for the ESCAPE2-project
+# Last edit: 2021-02-02
+# Contact: michiel.vanginderachter@meteo.be
+
 from netCDF4 import Dataset
 import numpy as np
 import pandas as pd
@@ -48,10 +52,10 @@ class Validator:
   def __init__(self,model=None,**kw):
     '''Initalize Validator
     Args:
-        model: choose the model, possible options: ICON-O, ICON-A, IFS, IFSVM, NEMO, new or load. 
+        model: choose the model, possible options: ICON-O, ICON-A, IFS, IFSVM, NEMO, or a pkl file exported by the Calibrator. 
         For each model different testcases are available, run without testcase keyword 
         to get info on the available testcases for a given model.
-        testcase: (optional) select the testcase for a given model (not needed for model = 'new' or 'load')
+        testcase: (optional) select the testcase for a given model (not needed when a Calibrator pkl file is given.)
     Returns:
         Validator object.
     ''' 
@@ -68,16 +72,6 @@ class Validator:
         filename = model + '_' + testcase + '.pkl'
         with open(filename,'rb') as f:
           pkl = pickle.load(f)
-        self.__ignore = pkl[0]
-        self.__Vmu = pkl[1]
-        self.__Vsigma = pkl[2]
-        self.__Vmu2 = pkl[3]
-        self.__P = pkl[4]
-        self.__Ssigma = pkl[5]
-        self.nNew=3
-        self.nRun=2
-        self.nPc=2
-        self.__limit = 3.448275
         self.__iname = "ocean_omip_medium_OUT__23000201T000000Z.nc"
         self.__oname = "ocean_omip_medium_GLOBALMEANOUT__23000201T000000Z.nc"
       elif testcase == 'large':
@@ -92,9 +86,29 @@ class Validator:
       print('to be implemented...')
     elif model == 'NEMO':
       print('to be implemented...')
-    elif model == 'new':
-      print('Setting up Validator for a new model and/or testcase \n use calibrate(ensemble) to calibrate the validator')
+    else:
+      print('Loading pickle-file: '+ model)
+      with open(model,'rb') as f:
+        pkl = pickle.load(f)
+      self.__iname = None
+      self.__oname = None
+    self.__ignore = pkl[0]
+    self.__Vmu    = pkl[1]
+    self.__Vsigma = pkl[2]
+    self.__Vmu2   = pkl[3]
+    self.__P      = pkl[4]
+    self.__Ssigma = pkl[5]
+    self.nNew     = pkl[6]
+    self.nRun     = pkl[7]
+    self.nPc      = pkl[8]
+    self.__limit  = pkl[9]
+       
+  def setIname(self,iname):
+    self.__iname = iname
 
+  def setOname(self, oname):
+     self.__oname = oname
+      
   def __isFail(self,input):
     '''Checks if nPC number of identical Principle Components deviate more than Msigma standard deviations
        from the reference Principle components for nRun new ensemble members.
@@ -259,12 +273,12 @@ class Calibrator:
       self.nComponents = pca.n_components_
       print('Number of PC-components to use is set to: ' + str(self.nComponents) + ' (explains 90% of the variance)')
 
-  def calibrateFailParams(self,nCPU=None,nRunMax=5,nPcMax=5):
+  def calibrateFailParams(self,nCPU=None,nRunMax=4,nPcMax=5):
     ''' Calibrate the nNew, nRun and nPc parameters. 
     Args:
         nCPU    : Number of CPUs used for calculations (default = max number of CPUs available)
         nRunMax : Maximum value of number of new runs (nNEW) to investigate. Caution: becomes 
-                 calculational very heavy for nRunMax > 5 (default = 5)
+                 calculational very heavy for nRunMax > 5 (default = 4)
         nPcMax  : Maximum value of number of failed PCs to investigate (default = 5)
     Returns:
         A list of dataframes, one element for each value going from 2 to nRunMax, every dataframe
@@ -351,19 +365,53 @@ class Calibrator:
     result.columns = ensSizes
     ax = result.boxplot(showfliers=False)
     ax.axhline(0.5)
-    show()
+    show(block=False)
     return(result)
   
-  def setEnsSize(self,ensSize):
+  def setEnsSize(self,ensSize,limitFR):
     ''' Set the ensemble size
      Args:
-         ensSize
+         ensSize : Size of the reference ensemble
+         limitFR : Upper limit of Failure Rate  
      Returns:
          none
     '''
     self.ensSize = ensSize
-   
+    self.limitFR = limitFR
+  
+  def setIgnore(self,ignore):
+    ''' Sets the list of variables to ignore when loading a new ensemble
+    Args:
+        ignore : list of variables to ignore (e.g. geographical variables or constant variables)
+    Returns:
+        none
+    '''
+    self.ignore = ignore
 
+  def export(self,modelName,dir):
+    ''' Exports the calibrator settings (in .pkl format) for use by the validator
+    Args:
+       modelName  : name of the model
+       dir        : directory where to save the data
+    Returns:
+       the location of the exported data
+    '''
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+    ensREF    = self.ensemble.sample(self.ensSize)
+    scaler    = StandardScaler()
+    ensREF_sc = scaler.fit_transform(ensREF)
+    Vmu       = scaler.mean_
+    Vsigma    = scaler.scale_
+    pca       = PCA(n_components = self.nComponents).fit(ensREF_sc)
+    Vmu2      = pca.mean_
+    P         = pca.components_.T
+    Ssigma    = np.sqrt(pca.explained_variance_)
+    with open(dir + modelName + '.pkl','wb') as f:
+      pickle.dump([self.ignore,Vmu,Vsigma,Vmu2,P,Ssigma,self.nNew,self.nRun,self.nPc,self.limitFR],f)
+    return(dir + modelName + '.pkl')	
+
+ 
 def main():
   print('This is the main function')
 
