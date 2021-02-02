@@ -9,13 +9,11 @@
 # 
 
 import pandas as pd
-import pickle
 from netCDF4 import Dataset
 from HPCWval import *
 
 # Load the reference ensemble:
-with open("ICON-O_medium_refENS_400.pkl",'rb') as f:
-  ensemble = pickle.load(f)
+ensemble = pd.read_csv("ICON-O_medium_refENS_400.csv")
 
 # Initialize the calibrator
 cal = Calibrator(ensemble=ensemble)
